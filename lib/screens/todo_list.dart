@@ -1,14 +1,15 @@
+import 'dart:async';
+import 'dart:developer' as developer;
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:path/path.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:todo/services/todo_service.dart';
 import 'package:todo/sql_helper.dart';
 import 'package:todo/utils/snackbar_helper.dart';
 import 'package:todo/widgets/todo_card.dart';
 import 'add_page.dart';
-import 'dart:async';
-import 'dart:developer' as developer;
-
-import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:flutter/services.dart';
 
 class TodoListPage extends StatefulWidget {
   const TodoListPage({Key? key}) : super(key: key);
@@ -20,48 +21,47 @@ class TodoListPage extends StatefulWidget {
 class _TodoListPageState extends State<TodoListPage> {
   ConnectivityResult _connectionStatus = ConnectivityResult.none;
   final Connectivity _connectivity = Connectivity();
-  late StreamSubscription<ConnectivityResult> _connectivitySubscription;
-
-
-  @override
-  void dispose() {
-    _connectivitySubscription.cancel();
-    super.dispose();
-  }
-  TextEditingController titleController = TextEditingController();
-  TextEditingController descriptionController = TextEditingController();
-
-  List<Map<String,dynamic>> _journals =[];
-  bool isLoading = false;
-  void _refreshJournals() async{
-    final data = await SQLHelper.getItems();
-    setState(() {
-      _journals =data;
-      isLoading =false;
-    });
-  }
-  List items = [];
+  StreamSubscription<ConnectivityResult>? _connectivitySubscription;
 
   @override
   void initState() {
     super.initState();
     initConnectivity();
-
-    _connectivitySubscription =
-        _connectivity.onConnectivityChanged.listen(_updateConnectionStatus);
-    fetchTodo();
     _refreshJournals();
-    print("..number of items ${_journals.length}");
+    // print("..number of items ${_journals.length}");
   }
+
+  @override
+  void dispose() {
+    _connectivitySubscription?.cancel();
+    super.dispose();
+  }
+
+  TextEditingController titleController = TextEditingController();
+
+  TextEditingController descriptionController = TextEditingController();
+  List<Map<String, dynamic>> _journals = [];
+
+  bool isLoading = false;
+
+  void _refreshJournals() async {
+    List<Map<String, dynamic>> data;
+    if (_connectionStatus == ConnectivityResult.none) {
+      data = await SQLHelper.getItems();
+    } else {
+      data = List<Map<String, dynamic>>.from(items);
+    }
+    setState(() {
+      _journals = data;
+      isLoading = false;
+    });
+  }
+
+  List items = [];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        centerTitle: true,
-        elevation: 0,
-        title: const Text("Todo List"),
-      ),
       body: Visibility(
         visible: isLoading,
         replacement: RefreshIndicator(
@@ -94,10 +94,61 @@ class _TodoListPageState extends State<TodoListPage> {
     );
   }
 
+  Future<void> initConnectivity() async {
+    try {
+      final result = await _connectivity.checkConnectivity();
+      setState(() {
+        _connectionStatus = result;
+      });
+
+      if (result == ConnectivityResult.none) {
+        // ignore: use_build_context_synchronously
+        showDialog(
+          context: this.context,
+          builder: (BuildContext context) {
+            return const NoInternetDialog();
+          },
+        );
+        await fetchTodoFromDb();
+      } else {
+        setState(() {
+          isLoading = true;
+        });
+        await fetchTodo();
+      }
+      _connectivitySubscription?.cancel(); // Cancel any existing subscription
+
+      _connectivitySubscription =
+          _connectivity.onConnectivityChanged.listen((result) async {
+        if (result != _connectionStatus) {
+          setState(() {
+            _connectionStatus = result;
+          });
+
+          if (result == ConnectivityResult.none) {
+            showDialog(
+              context: this.context,
+              builder: (BuildContext context) {
+                return const NoInternetDialog();
+              },
+            );
+          } else {
+            setState(() {
+              isLoading = true;
+            });
+            await fetchTodo();
+          }
+        }
+      });
+    } on PlatformException catch (e) {
+      developer.log('Could not check connectivity status', error: e);
+    }
+  }
+
   Future<void> navigateToEditPage(Map item) async {
     final route =
         MaterialPageRoute(builder: (context) => AddTodoPage(todo: item));
-    await Navigator.push(context, route);
+    await Navigator.push(this.context, route);
     setState(() {
       isLoading = true;
     });
@@ -106,7 +157,7 @@ class _TodoListPageState extends State<TodoListPage> {
 
   Future<void> navigateToAddPage() async {
     final route = MaterialPageRoute(builder: (context) => const AddTodoPage());
-    await Navigator.push(context, route);
+    await Navigator.push(this.context, route);
     setState(() {
       isLoading = true;
     });
@@ -114,72 +165,121 @@ class _TodoListPageState extends State<TodoListPage> {
   }
 
   Future<void> deleteById(String id) async {
-    final isSuccess = await TodoService.deleteById(id);
-    if (isSuccess) {
+    if (_connectionStatus == ConnectivityResult.none) {
+      await SQLHelper.deleteItem(int.parse(id)); // Delete from local database
       final filtered = items.where((element) => element['_id'] != id).toList();
       setState(() {
         items = filtered;
       });
     } else {
-      // ignore: use_build_context_synchronously
-      showErrorMessage(context, message: 'Deletion Failed');
+      final isSuccess =
+          await TodoService.deleteById(id); // Delete from the server
+      if (isSuccess) {
+        final filtered =
+            items.where((element) => element['_id'] != id).toList();
+        setState(() {
+          items = filtered;
+        });
+      } else {
+        showErrorMessage(this.context, message: 'Deletion Failed');
+      }
     }
   }
 
   Future<void> fetchTodo() async {
-    final response = await TodoService.fetchTodos();
-    if (response != null) {
+    final todos = await TodoService.fetchTodos();
+    debugPrint(todos.toString());
+    if (todos != null) {
+      final databasePath = await getDatabasesPath();
+      final database = await openDatabase(
+        join(databasePath, 'my_database.db'),
+        onCreate: (db, version) {
+          db.execute('''
+            CREATE TABLE IF NOT EXISTS todos (
+              id INTEGER PRIMARY KEY,
+              _id TEXT,
+              title TEXT,
+              description TEXT,
+              date_time DATETIME,
+              completed INTEGER)''');
+          print("Baber");
+        },
+        version: 1,
+      );
+
+      final abc = await database.delete("todos");
+
+      debugPrint(abc.toString());
+
+      for (final todo in todos) {
+        final Map<String, dynamic> todoData = {
+          '_id': todo['_id'],
+          'title': todo['title'],
+          'description': todo['description'],
+          'date_time': todo['date_time'],
+          'completed':
+              todo['completed'] != null ? (todo['completed'] ? 1 : 0) : 0,
+        };
+        await database.insert('todos', todoData,
+            conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+
+      List<Map> result = await database.query("todos");
+
       setState(() {
-        items = response;
+        items = result;
       });
+
+      await database.close();
     } else {
       // ignore: use_build_context_synchronously
-      showErrorMessage(context, message: 'Something Went Wrong');
+      showErrorMessage(this.context, message: 'Something Went Wrong');
     }
+    _refreshJournals();
+  }
+
+  Future<void> fetchTodoFromDb() async {
+    final databasePath = await getDatabasesPath();
+    final database = await openDatabase(
+      join(databasePath, 'my_database.db'),
+    );
+
+    List<Map> result = await database.query("todos");
+
     setState(() {
-      isLoading = false;
+      items = result;
     });
+
+    await database.close();
   }
 
   void showSuccessMessage(String message) {
     final snackBar = SnackBar(content: Text(message));
-    ScaffoldMessenger.of(context).showSnackBar(snackBar);
+    ScaffoldMessenger.of(this.context).showSnackBar(snackBar);
   }
-  void _showForm(int? id)async{
-    if (id != null){
-      final existingJournal =
-          _journals.firstWhere((element) => element['id']==id);
-      titleController.text=existingJournal['title'];
-      descriptionController.text=existingJournal['description'];
-    }
-  }
-  Future<void> _addItem() async{
-    await SQLHelper.createItem(
-        titleController.text,
-        descriptionController.text,
+}
+
+class NoInternetDialog extends StatelessWidget {
+  const NoInternetDialog({
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(50),
+      ),
+      title: const Text('No Internet Connection'),
+      content: const Text('Please check your internet connection.'),
+      actions: [
+        TextButton(
+          onPressed: () {
+            Navigator.of(context).pop(); // Update the context parameter
+          },
+          child: const Text('OK'),
+        ),
+      ],
     );
-    _refreshJournals();
-    print("..number of items ${_journals.length}");
-  }
-  Future<void> initConnectivity() async {
-    late ConnectivityResult result;
-    // Platform messages may fail, so we use a try/catch PlatformException.
-    try {
-      result = await _connectivity.checkConnectivity();
-    } on PlatformException catch (e) {
-      developer.log('Could\'t check connectivity status', error: e);
-      return;
-    }
-    if (!mounted) {
-      return Future.value(null);
-    }
-
-    return _updateConnectionStatus(result);
-  }
-
-  Future<void> _updateConnectionStatus(ConnectivityResult result) async {
-    setState(() {
-      _connectionStatus = result;
-    });
   }
 }

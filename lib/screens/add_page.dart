@@ -1,6 +1,14 @@
+import 'package:connectivity/connectivity.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:todo/services/todo_service.dart';
 import 'package:todo/utils/snackbar_helper.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
+import '../main.dart';
 
 class AddTodoPage extends StatefulWidget {
   final Map? todo;
@@ -14,6 +22,37 @@ class AddTodoPage extends StatefulWidget {
 class _AddTodoPageState extends State<AddTodoPage> {
   TextEditingController titleController = TextEditingController();
   TextEditingController descriptionController = TextEditingController();
+
+  // TextEditingController _dateTimeController = TextEditingController();
+  DateTime? _selectedDateTime;
+
+  Future<void> _selectDateTime(BuildContext context) async {
+    final DateTime? pickedDateTime = await showDatePicker(
+      context: context,
+      initialDate: DateTime.now(),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (pickedDateTime != null) {
+      // ignore: use_build_context_synchronously
+      final TimeOfDay? pickedTime = await showTimePicker(
+        context: context,
+        initialTime: TimeOfDay.now(),
+      );
+      if (pickedTime != null) {
+        setState(() {
+          _selectedDateTime = DateTime(
+            pickedDateTime.year,
+            pickedDateTime.month,
+            pickedDateTime.day,
+            pickedTime.hour,
+            pickedTime.minute,
+          );
+        });
+      }
+    }
+  }
+
   bool isEdit = false;
 
   @override
@@ -51,15 +90,54 @@ class _AddTodoPageState extends State<AddTodoPage> {
             maxLines: 5,
             maxLength: 100,
           ),
+          TextField(
+            readOnly: true,
+            onTap: () => _selectDateTime(context),
+            controller: TextEditingController(
+              text:
+                  _selectedDateTime != null ? _selectedDateTime.toString() : '',
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Select Date and Time',
+            ),
+          ),
           const SizedBox(
             height: 20,
           ),
           ElevatedButton(
-              onPressed: isEdit ? updateData : submitData,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(isEdit ? 'Update' : "Submit"),
-              ))
+            onPressed: () async {
+              if (isEdit) {
+                if (await checkInternetConnectivity()) {
+                  updateData();
+                } else {
+                  // ignore: use_build_context_synchronously
+                  showDialog(
+                    context: context,
+                    builder: (BuildContext context) {
+                      return const NoInternetDialog();
+                    },
+                  );
+                }
+              } else {
+                if (await checkInternetConnectivity()) {
+                  // submitData();
+                 await saveTodo();
+                } else {
+                  // ignore: use_build_context_synchronously
+                  showDialog(
+                    context: context,
+                    builder: (BuildContext context) {
+                      return const NoInternetDialog();
+                    },
+                  );
+                }
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(isEdit ? 'Update' : 'Submit'),
+            ),
+          )
         ],
       ),
     );
@@ -75,10 +153,10 @@ class _AddTodoPageState extends State<AddTodoPage> {
     final isSuccess = await TodoService.updateTodo(id, body);
     if (isSuccess) {
       // ignore: use_build_context_synchronously
-      showSuccessMessage(context, message: 'Update Success');
+      showSuccessMessage(this.context, message: 'Update Success');
     } else {
       // ignore: use_build_context_synchronously
-      showErrorMessage(context, message: 'Updation Failed');
+      showErrorMessage(this.context, message: 'Update Failed');
     }
   }
 
@@ -90,11 +168,112 @@ class _AddTodoPageState extends State<AddTodoPage> {
       titleController.text = '';
       descriptionController.text = '';
       // ignore: use_build_context_synchronously
-      showSuccessMessage(context, message: 'Creation Success');
+      showSuccessMessage(this.context, message: 'Creation Success');
     } else {
       // ignore: use_build_context_synchronously
-      showErrorMessage(context, message: 'Creation Failed');
+      showErrorMessage(this.context, message: 'Creation Failed');
     }
+  }
+
+  // Convert DateTime to TZDateTime
+  tz.TZDateTime convertToTimeZoneDateTime(DateTime dateTime, String timeZone) {
+    final timeZoneLocation = tz.getLocation(timeZone);
+    return tz.TZDateTime.from(dateTime, timeZoneLocation);
+  }
+
+  Future<void> saveTodo() async {
+    // Initialize the timezone database
+    tz.initializeTimeZones();
+
+    final databasePath = await getDatabasesPath();
+    final database = await openDatabase(
+      join(databasePath, 'my_database.db'),
+      onCreate: (db, version) {
+        db.execute('''
+          CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY,
+            _id TEXT,
+            title TEXT,
+            description TEXT,
+            date_time DATETIME,
+            completed INTEGER)''');
+        print("Baber");
+      },
+      version: 1,
+    );
+
+    // Create a new DateTime object using the UTC values
+    DateTime utcDateTime = DateTime.utc(
+      _selectedDateTime!.year,
+      _selectedDateTime!.month,
+      _selectedDateTime!.day,
+      _selectedDateTime!.hour,
+      _selectedDateTime!.minute,
+      _selectedDateTime!.second,
+    );
+
+    final Map<String, dynamic> todoData = {
+      'title': titleController.text,
+      'description': descriptionController.text,
+      'date_time': utcDateTime.toIso8601String(), // Convert to ISO 8601 string
+      'completed': 0,
+    };
+    await database.insert('todos', todoData, conflictAlgorithm: ConflictAlgorithm.replace);
+
+    final todoId = await getRecentlyInsertedTodo(); // Await the function call
+
+    tz.TZDateTime scheduledDateTime = tz.TZDateTime.from(
+      utcDateTime,
+      tz.getLocation('Asia/Karachi'), // Replace with the desired time zone location
+    );
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      todoId as int,
+      'Todo Reminder',
+      titleController.text,
+      scheduledDateTime,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'todo_reminders',
+          'Todo Reminders',
+          channelDescription: 'Receive reminders for your todo tasks',
+          importance: Importance.max,
+          priority: Priority.high,
+        ),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
+    );
+
+    await database.close();
+  }
+
+  Future<int?> getRecentlyInsertedTodo() async {
+    // Run a query to fetch the most recently inserted todo
+    final databasePath = await getDatabasesPath();
+    final database = await openDatabase(
+      join(databasePath, 'my_database.db'),
+    );
+    List<Map<String, dynamic>> results = await database.query(
+      'todos',
+      orderBy: '_id DESC',
+      limit: 1,
+    );
+
+    await database.close();
+
+    // Return the ID value as an int
+    if (results.isNotEmpty) {
+      return results.first['id'] as int?;
+    }
+
+    return null;
+  }
+
+
+  Future<bool> checkInternetConnectivity() async {
+    final connectivityResult = await Connectivity().checkConnectivity();
+    return connectivityResult != ConnectivityResult.none;
   }
 
   Map get body {
@@ -105,5 +284,30 @@ class _AddTodoPageState extends State<AddTodoPage> {
       "description": description,
       "is_completed": false,
     };
+  }
+}
+
+class NoInternetDialog extends StatelessWidget {
+  const NoInternetDialog({
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(50),
+      ),
+      title: const Text('No Internet Connection'),
+      content: const Text('Please check your internet connection.'),
+      actions: [
+        TextButton(
+          onPressed: () {
+            Navigator.of(context).pop(); // Update the context parameter
+          },
+          child: const Text('OK'),
+        ),
+      ],
+    );
   }
 }
