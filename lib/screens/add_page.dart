@@ -2,10 +2,9 @@ import 'package:connectivity/connectivity.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:todo/services/notification_service.dart';
 import 'package:todo/services/todo_service.dart';
 import 'package:todo/utils/snackbar_helper.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../main.dart';
@@ -20,6 +19,8 @@ class AddTodoPage extends StatefulWidget {
 }
 
 class _AddTodoPageState extends State<AddTodoPage> {
+  final NotificationService _notificationService = NotificationService();
+
   TextEditingController titleController = TextEditingController();
   TextEditingController descriptionController = TextEditingController();
 
@@ -121,7 +122,7 @@ class _AddTodoPageState extends State<AddTodoPage> {
               } else {
                 if (await checkInternetConnectivity()) {
                   // submitData();
-                 await saveTodo();
+                  saveTodo();
                 } else {
                   // ignore: use_build_context_synchronously
                   showDialog(
@@ -175,21 +176,13 @@ class _AddTodoPageState extends State<AddTodoPage> {
     }
   }
 
-  // Convert DateTime to TZDateTime
-  tz.TZDateTime convertToTimeZoneDateTime(DateTime dateTime, String timeZone) {
-    final timeZoneLocation = tz.getLocation(timeZone);
-    return tz.TZDateTime.from(dateTime, timeZoneLocation);
-  }
-
   Future<void> saveTodo() async {
-    // Initialize the timezone database
-    tz.initializeTimeZones();
-
-    final databasePath = await getDatabasesPath();
-    final database = await openDatabase(
-      join(databasePath, 'my_database.db'),
-      onCreate: (db, version) {
-        db.execute('''
+    try {
+      final databasePath = await getDatabasesPath();
+      final database = await openDatabase(
+        join(databasePath, 'my_database.db'),
+        onCreate: (db, version) {
+          db.execute('''
           CREATE TABLE IF NOT EXISTS todos (
             id INTEGER PRIMARY KEY,
             _id TEXT,
@@ -197,55 +190,54 @@ class _AddTodoPageState extends State<AddTodoPage> {
             description TEXT,
             date_time DATETIME,
             completed INTEGER)''');
-        print("Baber");
-      },
-      version: 1,
-    );
+          print("Baber");
+        },
+        version: 1,
+      );
 
-    // Create a new DateTime object using the UTC values
-    DateTime utcDateTime = DateTime.utc(
-      _selectedDateTime!.year,
-      _selectedDateTime!.month,
-      _selectedDateTime!.day,
-      _selectedDateTime!.hour,
-      _selectedDateTime!.minute,
-      _selectedDateTime!.second,
-    );
+      // Create a new DateTime object using the UTC values
+      DateTime utcDateTime = DateTime.utc(
+        _selectedDateTime!.year,
+        _selectedDateTime!.month,
+        _selectedDateTime!.day,
+        _selectedDateTime!.hour,
+        _selectedDateTime!.minute,
+        _selectedDateTime!.second,
+      );
 
-    final Map<String, dynamic> todoData = {
-      'title': titleController.text,
-      'description': descriptionController.text,
-      'date_time': utcDateTime.toIso8601String(), // Convert to ISO 8601 string
-      'completed': 0,
-    };
-    await database.insert('todos', todoData, conflictAlgorithm: ConflictAlgorithm.replace);
+      final Map<String, dynamic> todoData = {
+        'title': titleController.text,
+        'description': descriptionController.text,
+        'date_time': utcDateTime.toIso8601String(),
+        // Convert to ISO 8601 string
+        'completed': 0,
+      };
+      await database.insert('todos', todoData,
+          conflictAlgorithm: ConflictAlgorithm.replace);
+      final todoId = await getRecentlyInsertedTodo(); // Await the function call
 
-    final todoId = await getRecentlyInsertedTodo(); // Await the function call
+      await _notificationService.showNotifications()
 
-    tz.TZDateTime scheduledDateTime = tz.TZDateTime.from(
-      utcDateTime,
-      tz.getLocation('Asia/Karachi'), // Replace with the desired time zone location
-    );
+      await _notificationService.scheduleNotifications(
+          id: todoId as int,
+          title: titleController.text,
+          body: descriptionController.text,
+          time: utcDateTime);
 
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      todoId as int,
-      'Todo Reminder',
-      titleController.text,
-      scheduledDateTime,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'todo_reminders',
-          'Todo Reminders',
-          channelDescription: 'Receive reminders for your todo tasks',
-          importance: Importance.max,
-          priority: Priority.high,
+      await database.close();
+
+      ScaffoldMessenger.of(this.context).showSnackBar(
+        const SnackBar(
+          content: Text("Done!"),
         ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
-    );
-
-    await database.close();
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(this.context).showSnackBar(
+        const SnackBar(
+          content: Text("Shit"),
+        ),
+      );
+    }
   }
 
   Future<int?> getRecentlyInsertedTodo() async {
@@ -269,7 +261,6 @@ class _AddTodoPageState extends State<AddTodoPage> {
 
     return null;
   }
-
 
   Future<bool> checkInternetConnectivity() async {
     final connectivityResult = await Connectivity().checkConnectivity();
