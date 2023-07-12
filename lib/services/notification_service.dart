@@ -33,8 +33,10 @@ class NotificationService {
         .show(id, title, body, platformChannelSpecifics, payload: payload);
   }
 
-  Future<void> scheduleNotifications({id, title, body, time, required FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin}) async {
+  Future<void> scheduleNotifications({id, title, body, time,
+    required FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin}) async {
     try {
+      print("Tz local ${tz.TZDateTime.from(time, tz.local)}");
       await flutterLocalNotificationsPlugin.zonedSchedule(
           id,
           title,

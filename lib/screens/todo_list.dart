@@ -28,7 +28,6 @@ class _TodoListPageState extends State<TodoListPage> {
     super.initState();
     initConnectivity();
     _refreshJournals();
-    // print("..number of items ${_journals.length}");
   }
 
   @override

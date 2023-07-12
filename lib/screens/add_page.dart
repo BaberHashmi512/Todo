@@ -5,9 +5,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:todo/services/notification_service.dart';
 import 'package:todo/services/todo_service.dart';
 import 'package:todo/utils/snackbar_helper.dart';
-import 'package:timezone/timezone.dart' as tz;
-
-import '../main.dart';
+import 'package:todo/main.dart';
 
 class AddTodoPage extends StatefulWidget {
   final Map? todo;
@@ -195,46 +193,35 @@ class _AddTodoPageState extends State<AddTodoPage> {
         version: 1,
       );
 
-      // Create a new DateTime object using the UTC values
-      DateTime utcDateTime = DateTime.utc(
-        _selectedDateTime!.year,
-        _selectedDateTime!.month,
-        _selectedDateTime!.day,
-        _selectedDateTime!.hour,
-        _selectedDateTime!.minute,
-        _selectedDateTime!.second,
-      );
-
       final Map<String, dynamic> todoData = {
         'title': titleController.text,
         'description': descriptionController.text,
-        'date_time': utcDateTime.toIso8601String(),
-        // Convert to ISO 8601 string
+        'date_time': _selectedDateTime?.toIso8601String(),
         'completed': 0,
       };
       await database.insert('todos', todoData,
           conflictAlgorithm: ConflictAlgorithm.replace);
       final todoId = await getRecentlyInsertedTodo(); // Await the function call
 
-      await _notificationService.showNotifications()
 
       await _notificationService.scheduleNotifications(
           id: todoId as int,
           title: titleController.text,
           body: descriptionController.text,
-          time: utcDateTime);
-
+          time: _selectedDateTime,
+          flutterLocalNotificationsPlugin: flutterLocalNotificationsPlugin);
       await database.close();
 
+      // ignore: use_build_context_synchronously
       ScaffoldMessenger.of(this.context).showSnackBar(
         const SnackBar(
-          content: Text("Done!"),
+          content: Text("Todo added successfully!"),
         ),
       );
     } catch (e) {
       ScaffoldMessenger.of(this.context).showSnackBar(
-        const SnackBar(
-          content: Text("Shit"),
+        SnackBar(
+          content: Text("Error: $e"),
         ),
       );
     }
